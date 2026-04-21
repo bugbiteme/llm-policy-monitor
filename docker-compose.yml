@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # Mock Limitador service for local testing
+  mock-limitador:
+    image: python:3.11-slim
+    container_name: mock-limitador
+    ports:
+      - "9090:8080"
+    volumes:
+      - ./docker/mock-limitador.py:/app/mock-limitador.py
+    working_dir: /app
+    command: python mock-limitador.py
+    environment:
+      - FLASK_APP=mock-limitador.py
+      - FLASK_ENV=development
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # llm-policy-monitor service
+  llm-policy-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llm-policy-monitor
+    ports:
+      - "8080:8080"
+    environment:
+      - LIMITADOR_BASE_URL=http://mock-limitador:8080
+      - LIMITADOR_COUNTER_PATH=llm%2Fmaas-route
+      - PORT=8080
+      - DEBUG=False
+    depends_on:
+      mock-limitador:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - llm-network
+
+networks:
+  llm-network:
+    driver: bridge

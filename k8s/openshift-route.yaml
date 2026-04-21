@@ -1,0 +1,46 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: llm-policy-monitor
+  namespace: llm-playground
+  labels:
+    app: llm-policy-monitor
+spec:
+  host: llm-policy-monitor.apps.example.com
+  path: /
+  to:
+    kind: Service
+    name: llm-policy-monitor
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: llm-policy-monitor
+  namespace: llm-playground
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: llm-policy-monitor
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
