@@ -6,6 +6,7 @@ REST API for monitoring rate limit policies via Kuadrant Limitador
 import os
 import logging
 from typing import Any, List
+from urllib.parse import quote
 from flask import Flask, jsonify
 import requests
 from requests.adapters import HTTPAdapter
@@ -27,11 +28,6 @@ LIMITADOR_BASE_URL = os.getenv(
     'LIMITADOR_BASE_URL',
     'http://limitador-limitador.kuadrant-system.svc.cluster.local:8080'
 )
-LIMITADOR_COUNTER_PATH = os.getenv(
-    'LIMITADOR_COUNTER_PATH',
-    'llm%2Fmaas-route'
-)
-
 LIMITADOR_CONFIGMAP_NAME = os.getenv(
     'LIMITADOR_CONFIGMAP_NAME',
     'limitador-limits-config-limitador'
@@ -57,41 +53,54 @@ def create_session() -> requests.Session:
     return session
 
 
-def get_rate_limit_status() -> tuple[Any, int]:
-    """
-    Call Kuadrant Limitador to get rate limit counters.
-    
-    Returns:
-        tuple: (response_data, status_code)
-    """
+def _load_limit_namespaces() -> list[str]:
+    """Read unique Limitador namespaces from the ConfigMap."""
     try:
-        session = create_session()
-        url = f"{LIMITADOR_BASE_URL}/counters/{LIMITADOR_COUNTER_PATH}"
-        
-        logger.info(f"Fetching rate limit status from: {url}")
-        response = session.get(url, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        logger.info(f"Successfully retrieved rate limit status: {len(data) if isinstance(data, list) else 1} limit(s)")
-        
-        return data, 200
-        
-    except requests.exceptions.Timeout:
-        logger.error("Timeout while calling Limitador service")
-        return {"error": "Timeout calling Limitador service"}, 504
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Connection error: {str(e)}")
-        return {"error": "Failed to connect to Limitador service"}, 503
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"HTTP error: {str(e)}")
-        return {"error": f"HTTP error from Limitador: {response.status_code}"}, response.status_code
-    except ValueError as e:
-        logger.error(f"Failed to parse JSON response: {str(e)}")
-        return {"error": "Invalid JSON response from Limitador service"}, 502
+        config.load_incluster_config()
+    except config.ConfigException:
+        config.load_kube_config()
+
+    v1 = client.CoreV1Api()
+    cm = v1.read_namespaced_config_map(
+        name=LIMITADOR_CONFIGMAP_NAME,
+        namespace=LIMITADOR_CONFIGMAP_NAMESPACE,
+    )
+    limit_entries = yaml.safe_load(cm.data["limitador-config.yaml"])
+    return sorted({limit["namespace"] for limit in limit_entries})
+
+
+def get_rate_limit_status() -> tuple[Any, int]:
+    """Query Limitador counters for every namespace/httproute found in the ConfigMap."""
+    try:
+        namespaces = _load_limit_namespaces()
+    except client.exceptions.ApiException as e:
+        logger.error(f"K8s API error reading ConfigMap: {e}")
+        return {"error": f"K8s API error: {e.reason}"}, e.status
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        return {"error": "Internal server error"}, 500
+        logger.error(f"Failed to load limit namespaces: {e}")
+        return {"error": str(e)}, 500
+
+    session = create_session()
+    all_counters: list = []
+
+    for ns in namespaces:
+        url = f"{LIMITADOR_BASE_URL}/counters/{quote(ns, safe='')}"
+        logger.info(f"Fetching counters from: {url}")
+        try:
+            response = session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            all_counters.extend(data if isinstance(data, list) else [data])
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error for namespace '{ns}': {e}")
+            return {"error": "Failed to connect to Limitador service"}, 503
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout fetching counters for namespace '{ns}'")
+        except (requests.exceptions.HTTPError, ValueError) as e:
+            logger.error(f"Error fetching counters for namespace '{ns}': {e}")
+
+    logger.info(f"Retrieved {len(all_counters)} counter(s) across {len(namespaces)} namespace(s)")
+    return all_counters, 200
 
 
 @app.route('/v1/api/limits', methods=['GET'])
@@ -99,38 +108,25 @@ def limits() -> tuple[dict, int]:
     """Debug endpoint: reads Limitador ConfigMap and returns unique namespaces."""
     try:
         try:
-            config.load_incluster_config()
-        except config.ConfigException:
-            config.load_kube_config()
+            with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace") as f:
+                logger.info(f"Pod namespace: {f.read().strip()}")
+            with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
+                logger.info(f"Token (first 50 chars): {f.read().strip()[:50]}")
+        except FileNotFoundError:
+            logger.info("Running outside cluster, skipping service account debug")
 
-        # Debug: log what we're actually using
-        with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace") as f:
-            pod_namespace = f.read().strip()
-        with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
-            token = f.read().strip()
-
-        logger.info(f"Pod namespace: {pod_namespace}")
         logger.info(f"Looking for ConfigMap '{LIMITADOR_CONFIGMAP_NAME}' in '{LIMITADOR_CONFIGMAP_NAMESPACE}'")
-        logger.info(f"Token (first 50 chars): {token[:50]}")
-
-        v1 = client.CoreV1Api()
-        cm = v1.read_namespaced_config_map(
-            name=LIMITADOR_CONFIGMAP_NAME,
-            namespace=LIMITADOR_CONFIGMAP_NAMESPACE,
-        )
-        limit_entries = yaml.safe_load(cm.data["limitador-config.yaml"])
-        namespaces = sorted({limit["namespace"] for limit in limit_entries})
+        namespaces = _load_limit_namespaces()
         return jsonify({"namespaces": namespaces}), 200
 
     except client.exceptions.ApiException as e:
-        logger.error(f"K8s API error reading ConfigMap: {e}")
-        logger.error(f"Status: {e.status}, Reason: {e.reason}, Body: {e.body}")
+        logger.error(f"K8s API error reading ConfigMap: {e.status} {e.reason} — {e.body}")
         return jsonify({"error": f"K8s API error: {e.reason}"}), e.status
     except KeyError as e:
         logger.error(f"ConfigMap missing expected key: {e}")
         return jsonify({"error": f"ConfigMap missing key: {e}"}), 500
     except Exception as e:
-        logger.error(f"Unexpected error in /limits: {e}")
+        logger.error(f"Unexpected error in /v1/api/limits: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -161,9 +157,11 @@ def health() -> tuple[dict, int]:
 def ready() -> tuple[dict, int]:
     """Readiness check endpoint for Kubernetes readiness probes."""
     try:
-        # Try to reach Limitador service to ensure it's ready
+        namespaces = _load_limit_namespaces()
+        if not namespaces:
+            return jsonify({"ready": False, "error": "No namespaces found in ConfigMap"}), 503
         session = create_session()
-        url = f"{LIMITADOR_BASE_URL}/counters/{LIMITADOR_COUNTER_PATH}"
+        url = f"{LIMITADOR_BASE_URL}/counters/{quote(namespaces[0], safe='')}"
         response = session.get(url, timeout=5)
         response.raise_for_status()
         return jsonify({"ready": True}), 200
