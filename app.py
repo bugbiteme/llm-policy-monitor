@@ -94,7 +94,7 @@ def get_rate_limit_status() -> tuple[Any, int]:
         return {"error": "Internal server error"}, 500
 
 
-@app.route('/limits', methods=['GET'])
+@app.route('/v1/api/limits', methods=['GET'])
 def limits() -> tuple[dict, int]:
     """Debug endpoint: reads Limitador ConfigMap and returns unique namespaces."""
     try:
@@ -102,6 +102,16 @@ def limits() -> tuple[dict, int]:
             config.load_incluster_config()
         except config.ConfigException:
             config.load_kube_config()
+
+        # Debug: log what we're actually using
+        with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace") as f:
+            pod_namespace = f.read().strip()
+        with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
+            token = f.read().strip()
+
+        logger.info(f"Pod namespace: {pod_namespace}")
+        logger.info(f"Looking for ConfigMap '{LIMITADOR_CONFIGMAP_NAME}' in '{LIMITADOR_CONFIGMAP_NAMESPACE}'")
+        logger.info(f"Token (first 50 chars): {token[:50]}")
 
         v1 = client.CoreV1Api()
         cm = v1.read_namespaced_config_map(
@@ -114,6 +124,7 @@ def limits() -> tuple[dict, int]:
 
     except client.exceptions.ApiException as e:
         logger.error(f"K8s API error reading ConfigMap: {e}")
+        logger.error(f"Status: {e.status}, Reason: {e.reason}, Body: {e.body}")
         return jsonify({"error": f"K8s API error: {e.reason}"}), e.status
     except KeyError as e:
         logger.error(f"ConfigMap missing expected key: {e}")
