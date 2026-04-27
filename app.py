@@ -10,6 +10,8 @@ from flask import Flask, jsonify
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import yaml
+from kubernetes import client, config
 
 # Configure logging
 logging.basicConfig(
@@ -28,6 +30,15 @@ LIMITADOR_BASE_URL = os.getenv(
 LIMITADOR_COUNTER_PATH = os.getenv(
     'LIMITADOR_COUNTER_PATH',
     'llm%2Fmaas-route'
+)
+
+LIMITADOR_CONFIGMAP_NAME = os.getenv(
+    'LIMITADOR_CONFIGMAP_NAME',
+    'limitador-limits-config-limitador'
+)
+LIMITADOR_CONFIGMAP_NAMESPACE = os.getenv(
+    'LIMITADOR_CONFIGMAP_NAMESPACE',
+    'kuadrant-system'
 )
 
 # Create requests session with retry strategy for resilience
@@ -81,6 +92,35 @@ def get_rate_limit_status() -> tuple[Any, int]:
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         return {"error": "Internal server error"}, 500
+
+
+@app.route('/limits', methods=['GET'])
+def limits() -> tuple[dict, int]:
+    """Debug endpoint: reads Limitador ConfigMap and returns unique namespaces."""
+    try:
+        try:
+            config.load_incluster_config()
+        except config.ConfigException:
+            config.load_kube_config()
+
+        v1 = client.CoreV1Api()
+        cm = v1.read_namespaced_config_map(
+            name=LIMITADOR_CONFIGMAP_NAME,
+            namespace=LIMITADOR_CONFIGMAP_NAMESPACE,
+        )
+        limit_entries = yaml.safe_load(cm.data["limitador-config.yaml"])
+        namespaces = sorted({limit["namespace"] for limit in limit_entries})
+        return jsonify({"namespaces": namespaces}), 200
+
+    except client.exceptions.ApiException as e:
+        logger.error(f"K8s API error reading ConfigMap: {e}")
+        return jsonify({"error": f"K8s API error: {e.reason}"}), e.status
+    except KeyError as e:
+        logger.error(f"ConfigMap missing expected key: {e}")
+        return jsonify({"error": f"ConfigMap missing key: {e}"}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error in /limits: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/v1/api/rlpstatus', methods=['GET'])
