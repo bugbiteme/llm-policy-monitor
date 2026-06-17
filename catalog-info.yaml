@@ -1,0 +1,32 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: llm-policy-monitor
+  description: A containerized backend service that provides a REST API to monitor rate-limit policies from the Kuadrant Limitador service.
+  annotations:
+    # Argo CD – app-name is the Application CR; instance-name matches the template form
+    argocd/app-name: llm-policy-monitor
+    argocd/instance-name: default
+    # Kubernetes integration (shows Pods/Deployments tab)
+    backstage.io/kubernetes-id: llm-policy-monitor
+    backstage.io/kubernetes-namespace: llm-playground
+    # Tekton integration (shows PipelineRuns tab)
+    janus-idp.io/tekton-enabled: "true"
+    janus-idp.io/tekton-namespace: llm-playground
+    # Dev Spaces – devfile in the code repo
+    # che.eclipse.org/devfile-url: https://github.com/rhdh-developers/my-rest-api-249-code/blob/main/.devfile.yaml
+    # Source code location for Backstage
+    backstage.io/source-location: url:https://github.com/bugbiteme/llm-policy-monitor
+    # backstage.io/techdocs-ref: url:https://github.com/rhdh-developers/my-rest-api-249-code
+    # GitHub repos for SCM links
+    github.com/project-slug: bugbiteme/llm-policy-monitor
+  links:
+    - url: https://github.com/bugbiteme/llm-policy-monitor
+      title: Source Code (GitHub)
+      icon: github
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:default/rhdh-devs
+  system: llm-playground
+ 
